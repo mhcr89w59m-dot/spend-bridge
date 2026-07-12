@@ -20,6 +20,7 @@ altered in any way.
 
 import email
 import email.policy
+import email.utils
 import html
 import imaplib
 import json
@@ -29,9 +30,27 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 IMAP_HOST = "imap.mail.me.com"
 LOOKBACK_DAYS = 4
+PARIS_TZ = ZoneInfo("Europe/Paris")
+
+
+def email_spent_at(msg) -> str | None:
+    """Paris-local 'YYYY-MM-DD HH:MM:SS' from the email's Date header, so
+    expenses keep their real transaction date even if the poller runs
+    (or catches up on a backlog) hours or days later."""
+    raw = msg["Date"]
+    if not raw:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------- Fortuneo card alerts ----------
 AMOUNT_RE = re.compile(
@@ -213,12 +232,14 @@ def main():
                     continue
 
                 order = parsed.pop("order", None)
+                spent_at = email_spent_at(msg)
                 payload = {
                     **parsed,
                     "hash": (
                         f"{parsed['source']}-{order}" if order
                         else (msg["Message-ID"] or f"icloud-uid-{uid.decode()}").strip()
                     ),
+                    **({"spentAt": spent_at} if spent_at else {}),
                 }
                 result = post_expense(worker_url, token, payload)
                 state = (
