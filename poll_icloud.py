@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -124,19 +125,28 @@ def post_expense(worker_url, token, payload) -> dict:
         headers={
             "Content-Type": "application/json",
             "X-Api-Token": token,
+            # Cloudflare's Browser Integrity Check rejects Python's
+            # default User-Agent with error 1010 — identify normally.
             "User-Agent": "Mozilla/5.0 (compatible; spend-tracker-poller/1.0)",
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:300]
-        print(f"Worker answered HTTP {e.code} at {req.full_url}", file=sys.stderr)
-        print(f"Response body: {body}", file=sys.stderr)
-        raise SystemExit(1)
-      
+    for attempt in (1, 2, 3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:300]
+            print(f"Worker answered HTTP {e.code}", file=sys.stderr)
+            print(f"Response body: {body}", file=sys.stderr)
+            raise SystemExit(1)
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            print(f"attempt {attempt}: no response ({e}), retrying...", file=sys.stderr)
+            time.sleep(5 * attempt)
+    print("Worker unreachable after 3 attempts", file=sys.stderr)
+    raise SystemExit(1)
+
+
 def main():
     user = os.environ["ICLOUD_EMAIL"]
     password = os.environ["ICLOUD_APP_PASSWORD"]
