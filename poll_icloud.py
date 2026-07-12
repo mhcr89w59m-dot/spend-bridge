@@ -51,6 +51,14 @@ AMZ_TOTAL_RE = re.compile(
 AMZ_ORDER_RE = re.compile(r"commande\s*:?\s*(\d{3}-\d{7}-\d{7})", re.IGNORECASE)
 AMZ_SUBJECT_RE = re.compile(r"«\s*(.+?)\s*»")
 
+# ---------- PayPal payment receipts ----------
+# "Vous avez payé 15,99 € EUR à Deezer."
+PP_PAID_RE = re.compile(
+    r"Vous avez payé\s*([0-9][0-9 ]*[.,][0-9]{2})\s*€(?:\s*EUR)?\s*à\s+(.{1,60}?)\s*\.",
+    re.IGNORECASE,
+)
+PP_ORDER_RE = re.compile(r"commande\s*:?\s*([A-Za-z0-9_\-]{8,40})", re.IGNORECASE)
+
 
 def flatten(msg) -> str:
     """Extract decoded text from all text/* parts, strip HTML, normalize."""
@@ -111,10 +119,29 @@ def parse_amazon(msg):
     }
 
 
+def parse_paypal(msg):
+    """Return an expense dict for a PayPal 'Vous avez payé' receipt, else None."""
+    flat = flatten(msg)
+    m = PP_PAID_RE.search(flat)
+    if not m:
+        return None  # login alerts, money received, refunds, marketing…
+    amount = float(m.group(1).replace(" ", "").replace(",", "."))
+    merchant = ("PayPal · " + m.group(2).strip())[:80]
+
+    om = PP_ORDER_RE.search(flat)
+    return {
+        "amount": amount,
+        "merchant": merchant,
+        "source": "paypal",
+        "order": om.group(1) if om else None,
+    }
+
+
 # sender filter → parser. The poller searches each sender separately.
 SOURCES = [
     ("contact.fortuneo.com", parse_fortuneo),
     ("confirmation-commande@amazon.fr", parse_amazon),
+    ("service@paypal.fr", parse_paypal),
 ]
 
 
@@ -189,7 +216,7 @@ def main():
                 payload = {
                     **parsed,
                     "hash": (
-                        f"amazon-{order}" if order
+                        f"{parsed['source']}-{order}" if order
                         else (msg["Message-ID"] or f"icloud-uid-{uid.decode()}").strip()
                     ),
                 }
