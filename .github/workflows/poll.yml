@@ -1,0 +1,27 @@
+name: Poll iCloud for bank alerts
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes (GitHub may add a few minutes of lag)
+  workflow_dispatch: {}       # manual "Run workflow" button for testing
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Poll mailbox and push expenses
+        env:
+          ICLOUD_EMAIL: ${{ secrets.ICLOUD_EMAIL }}
+          ICLOUD_APP_PASSWORD: ${{ secrets.ICLOUD_APP_PASSWORD }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: python poll_icloud.py
