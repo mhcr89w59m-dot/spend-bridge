@@ -121,7 +121,11 @@ def post_expense(worker_url, token, payload) -> dict:
     req = urllib.request.Request(
         worker_url.rstrip("/") + "/api?action=ingest",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "X-Api-Token": token},
+        headers={
+            "Content-Type": "application/json",
+            "X-Api-Token": token,
+            "User-Agent": "Mozilla/5.0 (compatible; spend-tracker-poller/1.0)",
+        },
         method="POST",
     )
     try:
