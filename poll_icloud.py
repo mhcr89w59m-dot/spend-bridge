@@ -124,10 +124,15 @@ def post_expense(worker_url, token, payload) -> dict:
         headers={"Content-Type": "application/json", "X-Api-Token": token},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read())
-
-
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:300]
+        print(f"Worker answered HTTP {e.code} at {req.full_url}", file=sys.stderr)
+        print(f"Response body: {body}", file=sys.stderr)
+        raise SystemExit(1)
+      
 def main():
     user = os.environ["ICLOUD_EMAIL"]
     password = os.environ["ICLOUD_APP_PASSWORD"]
