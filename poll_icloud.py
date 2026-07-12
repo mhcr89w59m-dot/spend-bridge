@@ -34,23 +34,32 @@ from zoneinfo import ZoneInfo
 
 IMAP_HOST = "imap.mail.me.com"
 LOOKBACK_DAYS = 4
-PARIS_TZ = ZoneInfo("Europe/Paris")
+try:
+    PARIS_TZ = ZoneInfo("Europe/Paris")
+except Exception:
+    # No IANA tzdata on this system (e.g. some Windows Python installs) —
+    # email_spent_at() degrades to None below.
+    PARIS_TZ = None
 
 
 def email_spent_at(msg) -> str | None:
     """Paris-local 'YYYY-MM-DD HH:MM:SS' from the email's Date header, so
     expenses keep their real transaction date even if the poller runs
     (or catches up on a backlog) hours or days later."""
+    if PARIS_TZ is None:
+        return None
     raw = msg["Date"]
     if not raw:
         return None
     try:
         dt = email.utils.parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
+        if dt.tzinfo is None:
+            return None
+        return dt.astimezone(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        # Malformed header etc. — fall back to the Worker's default
+        # (ingest time) rather than failing the poll.
         return None
-    if dt.tzinfo is None:
-        return None
-    return dt.astimezone(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------- Fortuneo card alerts ----------
 AMOUNT_RE = re.compile(
