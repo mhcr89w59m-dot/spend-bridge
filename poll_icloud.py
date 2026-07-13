@@ -32,6 +32,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import detect
+
 IMAP_HOST = "imap.mail.me.com"
 LOOKBACK_DAYS = 4
 try:
@@ -171,6 +173,107 @@ SOURCES = [
     ("confirmation-commande@amazon.fr", parse_amazon),
     ("service@paypal.fr", parse_paypal),
 ]
+KNOWN_SENDERS = [s for s, _ in SOURCES]
+
+# ---------- generalized merchant-email detection (any sender) ----------
+# Bounded IMAP subject search: only the positive-signal phrase groups
+# (never marketing/refund/cancellation/etc — those exist to let
+# detect.classify_email() route emails AWAY from import, not to widen
+# the search). Single source of truth is detect.SUBJECT_RULES so the
+# search terms and the classifier's own phrases never drift apart.
+GENERIC_SEARCH_SUBJECTS = sorted({
+    phrase
+    for cls in (
+        detect.Classification.PURCHASE_CONFIRMATION,
+        detect.Classification.PAYMENT_RECEIPT,
+        detect.Classification.BOOKING,
+        detect.Classification.SUBSCRIPTION_RENEWAL,
+    )
+    for phrase in detect.SUBJECT_RULES[cls]
+})
+
+
+def get_bodies(msg) -> tuple[str, str]:
+    """Separate HTML and plain-text bodies (unlike flatten(), which is
+    the crude regex-strip used by the three dedicated parsers above) —
+    detect.py's html_to_text() needs real markup to find block-tag
+    boundaries and image alt text."""
+    html_parts, plain_parts = [], []
+    for part in msg.walk():
+        if part.get_content_maintype() != "text":
+            continue
+        ctype = part.get_content_type()
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            text = payload.decode(charset, errors="replace")
+        except LookupError:
+            text = payload.decode("utf-8", errors="replace")
+        if ctype == "text/html":
+            html_parts.append(text)
+        elif ctype == "text/plain":
+            plain_parts.append(text)
+    return "\n".join(html_parts), "\n".join(plain_parts)
+
+
+def process_generic(msg, uid, worker_url, token):
+    """Second, additive detection pass for senders NOT covered by
+    SOURCES above (e.g. La Poste). Only ever posts source='merchant' —
+    never touches the amazon/paypal/email sources the dedicated parsers
+    use, so their proven dedup/TWINS behavior can't regress."""
+    subject = str(msg["Subject"] or "")
+    from_name, from_email = email.utils.parseaddr(msg["From"] or "")
+    body_html, body_plain = get_bodies(msg)
+
+    result = detect.classify_email(
+        subject=subject,
+        sender_email=from_email,
+        sender_name=from_name,
+        body_html=body_html,
+        body_plain=body_plain,
+        header_date=msg["Date"],
+    )
+
+    if result.outcome == detect.Outcome.IGNORE:
+        print(f"uid {uid.decode()}: ignored ({result.classification}, score={result.confidence})")
+        return
+    if not result.amount or not result.merchant:
+        print(f"uid {uid.decode()}: {result.outcome} outcome but no amount/merchant extracted, skipping")
+        return
+
+    if result.date_source == "body_explicit_date" and result.order_date:
+        spent_at = result.order_date + " 12:00:00"
+    else:
+        spent_at = email_spent_at(msg)
+
+    review_status = "confirmed" if result.outcome == detect.Outcome.IMPORT else "pending_review"
+    order_hash = (
+        f"merchant-{result.order_ref}" if result.order_ref
+        else (msg["Message-ID"] or f"icloud-uid-{uid.decode()}").strip()
+    )
+
+    payload = {
+        "amount": result.amount,
+        "merchant": result.merchant,
+        "source": "merchant",
+        "hash": order_hash,
+        "paymentMethod": result.payment_method,
+        "orderRef": result.order_ref,
+        "reviewStatus": review_status,
+        "confidence": result.confidence,
+        "reason": "; ".join(result.reasons)[:500],
+        **({"spentAt": spent_at} if spent_at else {}),
+    }
+    post_result = post_expense(worker_url, token, payload)
+    state = (
+        "duplicate/reconciled" if post_result.get("duplicate")
+        else "queued for review" if post_result.get("pendingReview")
+        else "NEW → pushed"
+    )
+    print(f"uid {uid.decode()}: {result.amount} € · {result.merchant} "
+          f"[{review_status}, score={result.confidence}] — {state}")
 
 
 def post_expense(worker_url, token, payload) -> dict:
@@ -217,6 +320,8 @@ def main():
         imap.login(user, password)
         imap.select("INBOX", readonly=True)  # never alters the mailbox
 
+        handled_uids: set[bytes] = set()
+
         for sender, parser in SOURCES:
             status, data = imap.uid("SEARCH", None, "FROM", sender, "SINCE", since)
             if status != "OK":
@@ -227,6 +332,7 @@ def main():
             print(f"[{sender}] {len(uids)} email(s) in the last {LOOKBACK_DAYS} days")
 
             for uid in uids:
+                handled_uids.add(uid)
                 status, fetched = imap.uid("FETCH", uid, "(BODY.PEEK[])")
                 if status != "OK" or not fetched or fetched[0] is None:
                     print(f"uid {uid.decode()}: fetch failed, skipping", file=sys.stderr)
@@ -256,6 +362,32 @@ def main():
                     else "NEW → pushed"
                 )
                 print(f"uid {uid.decode()}: {parsed['amount']} € · {parsed['merchant']} — {state}")
+
+        # Second pass: any sender, bounded to positive-signal subject
+        # keywords, for merchants with no dedicated parser (e.g. La
+        # Poste). Split into one SEARCH per keyword — a single query
+        # ORing dozens of terms risks exceeding IMAP command-length
+        # limits on some servers.
+        generic_uids: set[bytes] = set()
+        for keyword in GENERIC_SEARCH_SUBJECTS:
+            status, data = imap.uid("SEARCH", None, "SINCE", since, "SUBJECT", f'"{keyword}"')
+            if status != "OK":
+                continue
+            generic_uids.update(data[0].split())
+
+        generic_uids -= handled_uids
+        print(f"[generic] {len(generic_uids)} candidate email(s) from unrecognized senders")
+
+        for uid in generic_uids:
+            status, fetched = imap.uid("FETCH", uid, "(BODY.PEEK[])")
+            if status != "OK" or not fetched or fetched[0] is None:
+                print(f"uid {uid.decode()}: fetch failed, skipping", file=sys.stderr)
+                continue
+            msg = email.message_from_bytes(fetched[0][1], policy=email.policy.default)
+            from_email = email.utils.parseaddr(msg["From"] or "")[1].lower()
+            if any(known in from_email for known in KNOWN_SENDERS):
+                continue  # already covered by a dedicated parser above
+            process_generic(msg, uid, worker_url, token)
     finally:
         try:
             imap.logout()
