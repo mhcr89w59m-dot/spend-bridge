@@ -371,7 +371,10 @@ def main():
         generic_uids: set[bytes] = set()
         for keyword in GENERIC_SEARCH_SUBJECTS:
             status, data = imap.uid("SEARCH", None, "SINCE", since, "SUBJECT", f'"{keyword}"')
-            if status != "OK":
+            # iCloud's IMAP server sometimes answers OK with data[0]=None
+            # instead of b'' when a particular SUBJECT query matches
+            # nothing — observed live, not just a theoretical case.
+            if status != "OK" or not data or not data[0]:
                 continue
             generic_uids.update(data[0].split())
 
