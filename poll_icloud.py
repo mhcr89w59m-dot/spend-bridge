@@ -328,7 +328,7 @@ def main():
                 print(f"SEARCH failed for {sender}: {status}", file=sys.stderr)
                 continue
 
-            uids = data[0].split()
+            uids = data[0].split() if data and data[0] else []
             print(f"[{sender}] {len(uids)} email(s) in the last {LOOKBACK_DAYS} days")
 
             for uid in uids:
