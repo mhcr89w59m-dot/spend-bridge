@@ -35,10 +35,7 @@ from zoneinfo import ZoneInfo
 import detect
 
 IMAP_HOST = "imap.mail.me.com"
-# TEMPORARY: widened from 4 to backfill the gap left by the workflow being
-# auto-disabled for inactivity 2026-09-13 -> 2026-10-03. Revert to 4 right
-# after the catch-up run completes.
-LOOKBACK_DAYS = 25
+LOOKBACK_DAYS = 4
 try:
     PARIS_TZ = ZoneInfo("Europe/Paris")
 except Exception:
