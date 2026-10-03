@@ -1,0 +1,18 @@
+This file exists purely to generate a git commit once a week.
+
+GitHub auto-disables a repo's scheduled/dispatched Actions workflows after
+60 days with no repository push activity — critically, workflow RUNS
+(scheduled or dispatched) do NOT count as activity, only actual pushes do.
+This bit us on 2026-10-03: the Cloudflare Worker had been dispatching
+poll.yml every 5 minutes for weeks, but with zero git pushes to this repo,
+GitHub silently disabled the workflow anyway, and ~3 weeks of bank-alert
+emails went unimported until a human noticed and re-enabled it by hand.
+
+touchHeartbeat() in spend-tracker-cloudflare's src/worker.js updates the
+line below via the GitHub Contents API on a weekly Cron Trigger
+("0 3 * * 1" in wrangler.toml) — a real push, which resets GitHub's
+60-day clock indefinitely without relying on GitHub's own scheduler.
+
+Do not delete this file.
+
+Last touched: 2026-10-03T00:00:00Z
